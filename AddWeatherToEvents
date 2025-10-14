@@ -1,0 +1,110 @@
+function addWeatherToEvents() {
+
+// PARAMETERS
+
+  const calendarId = SECRET.calendarId;                        // See Secrets.gs for details  
+  const apiKey = SECRET.openWeatherApiKey;                     // See Secrets.gs for details
+  const lat = SECRET.lat;                                      // See Secrets.gs for details
+  const lon = SECRET.lon;                                      // See Secrets.gs for details
+  const eventTitles = ["Let's run", "Parkrun"];                // Array of event titles that you wish to update with the weather.
+  const daysAhead = 5;                                         // how many days ahead to update events
+  const tempUnit = "C";                                        // Temperature units "C" or "F"
+  const windUnit = "km/h";                                     // Wind speed units "m/s", "km/h", "mph"
+
+
+ 
+// FETCH WEATHER FORECAST FROM https://openweathermap.org/
+
+  let apiUnits = tempUnit === "C" ? "metric" : tempUnit === "F" ? "imperial" : "standard";
+  const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&units=${apiUnits}&appid=${apiKey}`;
+  const response = UrlFetchApp.fetch(url);
+  const data = JSON.parse(response.getContentText());
+
+  // Weather symbols
+  const weatherIcons = {
+    "Clear": "☀️",
+    "Clouds": "☁️",
+    "Rain": "🌧️",
+    "Drizzle": "🌦️",
+    "Thunderstorm": "⛈️",
+    "Snow": "❄️",
+    "Mist": "🌫️",
+    "Fog": "🌫️",
+    "Haze": "🌫️",
+    "Smoke": "💨",
+    "Dust": "🌪️",
+    "Sand": "🏜️",
+    "Ash": "🌋",
+    "Squall": "💨",
+    "Tornado": "🌪️"
+  };
+
+  const allIconsRegex = /[☀️☁️🌧️🌦️⛈️❄️🌫️🌁🌤️💨🌪️🌋🌀]/g;
+
+
+// MAIN SCRIPT
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const now = new Date();
+  const future = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
+  const events = calendar.getEvents(now, future);
+  events.forEach(event => {
+    let originalTitle = event.getTitle();
+
+    // Remove all weather icons from title
+    let cleanTitle = originalTitle.replace(allIconsRegex, "").trim();
+
+    if (!eventTitles.some(t => cleanTitle.includes(t))) return;
+
+    const start = event.getStartTime();
+
+    // Find closest forecast
+    const closest = data.list.reduce((prev, curr) =>
+      Math.abs(new Date(curr.dt * 1000) - start) <
+      Math.abs(new Date(prev.dt * 1000) - start)
+        ? curr
+        : prev
+    );
+
+    const condition = closest.weather[0].main;
+    const conditionIcon = weatherIcons[condition] || "";
+    const temp = closest.main.temp;
+    let windSpeed = closest.wind.speed;
+
+// Convert wind units
+    if (windUnit === "km/h") windSpeed = windSpeed * 3.6;
+    else if (windUnit === "mph") windSpeed = windSpeed * 2.23694;
+
+    const tempStr = `${temp.toFixed(1)} ${tempUnit === "C" ? "°C" : "°F"}`;
+    const windStr = `${windSpeed.toFixed(1)} ${windUnit}`;
+
+
+// UPDATE TITLE
+  
+    const newTitle = `${cleanTitle} ${conditionIcon}`;
+    event.setTitle(newTitle);
+
+// UPDATE DESCRIPTION
+
+    let desc = event.getDescription() || "";
+
+    // Regex to remove previous weather section delimited by "---"
+    const weatherSectionRegex = /---[\s\S]*?---\s*/;
+    desc = desc.replace(weatherSectionRegex, "").trim();
+
+// Construct new weather section
+    const weatherInfo = [
+      "---",
+      `${conditionIcon} Condition: ${condition}`,
+      `🌡️ Temperature: ${tempStr}`,
+      `💨 Wind speed: ${windStr}`,
+      "---"
+    ].join("\n");
+
+// Append weather section to existing description
+    desc = desc ? `${desc}\n${weatherInfo}` : weatherInfo;
+    event.setDescription(desc);
+
+    Logger.log(`Updated "${newTitle}" with weather section:\n${weatherInfo}`);
+  });
+}
