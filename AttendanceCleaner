@@ -1,0 +1,49 @@
+function deleteFullyDeclinedEvents() {
+
+// PARAMETERS 
+  const calendarId = SECRET.calendarId;               // See Secrets.gs for details
+  const eventTitles = ["Parkrun", "Let's run"];       // List of event titles to check
+  const lookAheadDays = 7;                            // How many days ahead to check
+
+
+
+// MAIN SCRIPT
+
+// List of valid icons
+  const validIcons = ["☀️","☁️","🌧️","🌦️","⛈️","❄️","🌫️","🌁","🌤️","💨","🌪️","🌋","🌀"];
+
+// Build regex dynamically to match event titles optionally ending with one of the icons
+  const iconsPattern = validIcons.map(i => i.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')).join("|");
+  const titlePattern = eventTitles.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join("|");
+  const iconRegex = new RegExp(`^(${titlePattern})(\\s*(${iconsPattern}))?$`, "i");
+
+  const now = new Date();
+  const future = new Date(now.getTime() + lookAheadDays * 24 * 60 * 60 * 1000);
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  if (!calendar) {
+    Logger.log(`❌ Calendar with ID "${calendarId}" not found.`);
+    return;
+  }
+
+  const events = calendar.getEvents(now, future);
+  events.forEach(event => {
+    const title = event.getTitle().trim();
+    if (!iconRegex.test(title)) return;
+
+    const attendees = event.getGuestList();
+    if (attendees.length === 0) return;
+
+    const totalGuests = attendees.length;
+    const declined = attendees.filter(g => g.getGuestStatus() === CalendarApp.GuestStatus.NO).length;
+
+    // Delete if 100% of guests declined
+    if (declined === totalGuests) {
+      Logger.log(`🗑️ Deleting event "${title}" — all ${totalGuests} guests declined.`);
+      event.deleteEvent();
+    } else {
+      const accepted = attendees.filter(g => g.getGuestStatus() === CalendarApp.GuestStatus.YES).length;
+      Logger.log(`✅ Keeping event "${title}" — ${accepted} accepted, ${declined} declined.`);
+    }
+  });
+}
