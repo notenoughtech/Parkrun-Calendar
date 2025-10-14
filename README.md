@@ -7,6 +7,8 @@ Parkrun-Calendar adds all sorts of improvements to your events, including weathe
 
 ## Features
 
+![Parkrun-Calendar Interface](https://notenoughtech.com/wp-content/uploads/2025/10/image-7.png)
+
 - **Parkrun Event Management**
   - Creates a Parkrun event in advance.
   - Invites participants automatically.
