@@ -1,0 +1,119 @@
+function createTeamWorkSunsetEvents() {
+
+// SCRIPT PARAMETERS 
+  
+  const calendarId = SECRET.calendarId;                               // See Secrets.gs for details
+  const lat = SECRET.lat;                                             // See Secrets.gs for details
+  const lon = SECRET.lon;                                             // See Secrets.gs for details
+  const guestList = SECRET.TrainingEmails;                            // See Secrets.gs for details
+  const eventTitle = "Let's run";                                     // Title of your calendar event 
+  const sunEvent = "sunset";                                          // "sunset" or "sunrise" as the time for your events
+  const offsetMinutes = 60;                                           // offset from sunset/sunrise (positive numbers only) 
+  const beforeOrAfter = "before";                                     // "before" or "after" look for free slots before or after the sunset/sunrise if unable to add one 
+  const validDays = [1,3,4];                                          // 0=Sun, 1=Mon, 2=Tue, etc.  
+  const daysAhead = 7;                                                // How many days ahead to create events
+  const eventDuration = 60;                                           // Event duration in minutes
+  const eventGap = 10;                                                // time offset in minutes between events
+  const conflictRange = 120;                                          // Max minutes to search for free slot (after or before sunrise - see beforeOrAfter)
+  const stepMinutes = 10;                                             // How ofthen (min) script should check for free/busy slots, smaller the number the longer it takes
+  
+
+//MAIN SCRIPT
+ 
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const calendarTimeZone = calendar.getTimeZone();
+  const today = new Date();
+
+  for (let i = 0; i < daysAhead; i++) {
+    const date = new Date(today);
+    date.setDate(today.getDate() + i);
+    const day = date.getDay();
+    if (!validDays.includes(day)) continue;
+
+    const isoDate = date.toISOString().split('T')[0];
+
+// Fetch sunrise/sunset time
+    const response = UrlFetchApp.fetch(`https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lon}&date=${isoDate}&formatted=0`);
+    const data = JSON.parse(response.getContentText());
+
+// Parse sunrise/sunset in UTC
+    let sunTimeUTC;
+    if (sunEvent === "sunrise") sunTimeUTC = new Date(data.results.sunrise);
+    else if (sunEvent === "sunset") sunTimeUTC = new Date(data.results.sunset);
+    else {
+      Logger.log(`Invalid sunEvent value: ${sunEvent}`);
+      continue;
+    }
+
+    // Convert UTC to calendar's timezone
+    let sunTimeLocalStr = Utilities.formatDate(sunTimeUTC, calendarTimeZone, "yyyy-MM-dd'T'HH:mm:ss");
+    let sunTimeLocal = new Date(sunTimeLocalStr);
+
+    // Compute target start time
+    let targetStart = new Date(sunTimeLocal);
+    if (beforeOrAfter === "before") targetStart.setMinutes(targetStart.getMinutes() - offsetMinutes);
+    else targetStart.setMinutes(targetStart.getMinutes() + offsetMinutes);
+    let targetEnd = new Date(targetStart.getTime() + eventDuration * 60000);
+
+    let start = targetStart;
+    let end = targetEnd;
+
+//CONFLIT HANDLING
+
+    let conflicts = calendar.getEvents(targetStart, targetEnd).filter(ev => !ev.isAllDayEvent());
+
+    if (conflicts.length > 0) {
+      let slotFound = false;
+
+      if (beforeOrAfter === "before") {
+        for (let m = stepMinutes; m <= conflictRange; m += stepMinutes) {
+          let testStart = new Date(targetStart.getTime() - m * 60000);
+          let testEnd = new Date(testStart.getTime() + eventDuration * 60000);
+
+          if ((targetStart.getTime() - testStart.getTime()) / 60000 > conflictRange) break;
+          if (calendar.getEvents(testStart, testEnd).filter(ev => !ev.isAllDayEvent()).length === 0) {
+            start = new Date(testStart.getTime() - eventGap * 60000);
+            end = new Date(start.getTime() + eventDuration * 60000);
+            slotFound = true;
+            break;
+          }
+        }
+      } else if (beforeOrAfter === "after") {
+        for (let m = stepMinutes; m <= conflictRange; m += stepMinutes) {
+          let testStart = new Date(targetStart.getTime() + m * 60000);
+          let testEnd = new Date(testStart.getTime() + eventDuration * 60000);
+
+          if ((testStart.getTime() - targetStart.getTime()) / 60000 > conflictRange) break;
+          if (calendar.getEvents(testStart, testEnd).filter(ev => !ev.isAllDayEvent()).length === 0) {
+            start = new Date(testStart.getTime() + eventGap * 60000);
+            end = new Date(start.getTime() + eventDuration * 60000);
+            slotFound = true;
+            break;
+          }
+        }
+      }
+      // If no conflict, start and end remain at targetStart/targetEnd
+      if (!slotFound) {
+        Logger.log(`Skipped ${isoDate} — no free slot within ${conflictRange} minutes of ${sunEvent}.`);
+        continue;
+      }
+    }    
+
+//CREATE NEW EVENT
+
+    const event = calendar.createEvent(eventTitle, start, end, {
+      guests: guestList.join(","),
+      sendInvites: true
+    });
+
+    /*
+    Optional: Add extra reminders:
+    event.removeAllReminders();               //remove all reminders
+    event.addPopupReminder(10);               // add a phone reminder 10 min before
+    event.addPopupReminder(60);               // add a phone reminder 1h before
+    event.addEmailReminder(1440);             // add an email reminder 1 day before    
+    */
+
+    Logger.log(`Created: ${event.getTitle()} on ${start}`);
+  }
+}
