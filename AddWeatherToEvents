@@ -1,26 +1,26 @@
 function addWeatherToEvents() {
 
-// PARAMETERS
+  // This script grabs the weather forecast for the next 5 days and updates events 
+  // with the forecast in the title and description.
+  // All updates are SILENT — no guest notifications are sent.
 
+  // PARAMETERS
   const calendarId = SECRET.calendarId;                        // See Secrets.gs for details  
   const apiKey = SECRET.openWeatherApiKey;                     // See Secrets.gs for details
   const lat = SECRET.lat;                                      // See Secrets.gs for details
   const lon = SECRET.lon;                                      // See Secrets.gs for details
-  const eventTitles = ["Let's run", "Parkrun"];                // Array of event titles that you wish to update with the weather.
-  const daysAhead = 5;                                         // how many days ahead to update events
-  const tempUnit = "C";                                        // Temperature units "C" or "F"
-  const windUnit = "km/h";                                     // Wind speed units "m/s", "km/h", "mph"
+  const eventTitles = ["Let's run", "Parkrun"];                // Event titles to update
+  const daysAhead = 5;                                         // How many days ahead to update events
+  const tempUnit = "C";                                        // "C" or "F"
+  const windUnit = "km/h";                                     // "m/s", "km/h", "mph"
 
-
- 
-// FETCH WEATHER FORECAST FROM https://openweathermap.org/
-
+  // FETCH WEATHER FORECAST
   let apiUnits = tempUnit === "C" ? "metric" : tempUnit === "F" ? "imperial" : "standard";
   const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&units=${apiUnits}&appid=${apiKey}`;
   const response = UrlFetchApp.fetch(url);
   const data = JSON.parse(response.getContentText());
 
-  // Weather symbols
+  // Weather icons
   const weatherIcons = {
     "Clear": "☀️",
     "Clouds": "☁️",
@@ -41,70 +41,115 @@ function addWeatherToEvents() {
 
   const allIconsRegex = /[☀️☁️🌧️🌦️⛈️❄️🌫️🌁🌤️💨🌪️🌋🌀]/g;
 
-
-// MAIN SCRIPT
-
+  // MAIN SCRIPT
   const calendar = CalendarApp.getCalendarById(calendarId);
   const now = new Date();
   const future = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
   const events = calendar.getEvents(now, future);
+
   events.forEach(event => {
-    let originalTitle = event.getTitle();
+    try {
+      let originalTitle = event.getTitle();
 
-    // Remove all weather icons from title
-    let cleanTitle = originalTitle.replace(allIconsRegex, "").trim();
+      // Remove previous weather icons
+      let cleanTitle = originalTitle.replace(allIconsRegex, "").trim();
 
-    if (!eventTitles.some(t => cleanTitle.includes(t))) return;
+      // Only process matching events
+      if (!eventTitles.some(t => cleanTitle.includes(t))) return;
 
-    const start = event.getStartTime();
+      const start = event.getStartTime();
 
-    // Find closest forecast
-    const closest = data.list.reduce((prev, curr) =>
-      Math.abs(new Date(curr.dt * 1000) - start) <
-      Math.abs(new Date(prev.dt * 1000) - start)
-        ? curr
-        : prev
-    );
+      // Find the forecast entry closest to the event start
+      const closest = data.list.reduce((prev, curr) =>
+        Math.abs(new Date(curr.dt * 1000) - start) <
+        Math.abs(new Date(prev.dt * 1000) - start)
+          ? curr
+          : prev
+      );
 
-    const condition = closest.weather[0].main;
-    const conditionIcon = weatherIcons[condition] || "";
-    const temp = closest.main.temp;
-    let windSpeed = closest.wind.speed;
+      const condition = closest.weather[0].main;
+      const conditionIcon = weatherIcons[condition] || "";
+      const temp = closest.main.temp;
+      let windSpeed = closest.wind.speed;
 
-// Convert wind units
-    if (windUnit === "km/h") windSpeed = windSpeed * 3.6;
-    else if (windUnit === "mph") windSpeed = windSpeed * 2.23694;
+      // Convert wind units
+      if (windUnit === "km/h") windSpeed *= 3.6;
+      else if (windUnit === "mph") windSpeed *= 2.23694;
 
-    const tempStr = `${temp.toFixed(1)} ${tempUnit === "C" ? "°C" : "°F"}`;
-    const windStr = `${windSpeed.toFixed(1)} ${windUnit}`;
+      const tempStr = `${temp.toFixed(1)} ${tempUnit === "C" ? "°C" : "°F"}`;
+      const windStr = `${windSpeed.toFixed(1)} ${windUnit}`;
 
+      // Build updated event info
+      const newTitle = `${cleanTitle} ${conditionIcon}`;
+      let desc = event.getDescription() || "";
+      const weatherSectionRegex = /---[\s\S]*?---\s*/;
+      desc = desc.replace(weatherSectionRegex, "").trim();
 
-// UPDATE TITLE
-  
-    const newTitle = `${cleanTitle} ${conditionIcon}`;
-    event.setTitle(newTitle);
+      const weatherInfo = [
+        "---",
+        `${conditionIcon} Condition: ${condition}`,
+        `🌡️ Temperature: ${tempStr}`,
+        `💨 Wind speed: ${windStr}`,
+        "---"
+      ].join("\n");
 
-// UPDATE DESCRIPTION
+      desc = desc ? `${desc}\n${weatherInfo}` : weatherInfo;
 
-    let desc = event.getDescription() || "";
+      // --- SILENT UPDATE USING CALENDAR API (UNIVERSAL FIX) ---
+      try {
+        let iCalId;
 
-    // Regex to remove previous weather section delimited by "---"
-    const weatherSectionRegex = /---[\s\S]*?---\s*/;
-    desc = desc.replace(weatherSectionRegex, "").trim();
+        // Try using getICalUID() if available
+        if (typeof event.getICalUID === "function") {
+          iCalId = event.getICalUID();
+        } else {
+          // Fallback: find the event by title and time if getICalUID() isn't supported
+          const startTimeISO = event.getStartTime().toISOString();
+          const endTimeISO = new Date(event.getEndTime().getTime() + 1).toISOString();
 
-// Construct new weather section
-    const weatherInfo = [
-      "---",
-      `${conditionIcon} Condition: ${condition}`,
-      `🌡️ Temperature: ${tempStr}`,
-      `💨 Wind speed: ${windStr}`,
-      "---"
-    ].join("\n");
+          const apiEventList = Calendar.Events.list(calendarId, {
+            timeMin: startTimeISO,
+            timeMax: endTimeISO,
+            q: cleanTitle,
+            maxResults: 3
+          });
 
-// Append weather section to existing description
-    desc = desc ? `${desc}\n${weatherInfo}` : weatherInfo;
-    event.setDescription(desc);
+          if (!apiEventList.items || apiEventList.items.length === 0) {
+            throw new Error("Event not found via fallback search");
+          }
 
-    Logger.log(`Updated "${newTitle}" with weather section:\n${weatherInfo}`);
+          iCalId = apiEventList.items[0].iCalUID;
+        }
+
+        // Fetch the event by iCalUID to get its real API eventId
+        const apiEventList = Calendar.Events.list(calendarId, {
+          iCalUID: iCalId,
+          maxResults: 1
+        });
+
+        if (!apiEventList.items || apiEventList.items.length === 0) {
+          throw new Error("Event not found in Calendar API");
+        }
+
+        const apiEvent = apiEventList.items[0];
+        const eventId = apiEvent.id;
+
+        const patch = {
+          summary: newTitle,
+          description: desc
+        };
+
+        // Silent update — no email notifications to guests
+        Calendar.Events.patch(patch, calendarId, eventId, { sendUpdates: "none" });
+
+        Logger.log(`✅ Updated "${newTitle}" silently with weather section:\n${weatherInfo}`);
+
+      } catch (apiErr) {
+        Logger.log(`⚠️ Calendar API update failed for "${event.getTitle()}": ${apiErr.message}`);
+      }
+
+    } catch (err) {
+      Logger.log(`❌ Error processing event "${event.getTitle()}": ${err.message}`);
+    }
   });
 }
