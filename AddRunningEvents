@@ -1,5 +1,10 @@
 function createTeamWorkSunsetEvents() {
 
+  //this script adds training sessions, one session per day, before or after sunrise/sunset
+  //takes in account other calendar events and tries to find a free slot
+  //has the ability to invite others to the session 
+  // check the bottom of the script for extra event reminders
+
 // SCRIPT PARAMETERS 
   
   const calendarId = SECRET.calendarId;                               // See Secrets.gs for details
