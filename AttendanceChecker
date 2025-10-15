@@ -5,8 +5,7 @@ function updateAttendanceThreshold() {
   const calendarId = SECRET.calendarId;               // See Secrets.gs for details
   const guestInfo = SECRET.guestInfo;                 // See Secrets.gs for details
   const eventTitles = ["Parkrun"];                    // An array of event names you wish the script to check
-  const lookAheadDays = 7;                            // Look ahead for events in days
-  const cancelThresholdHours = 4;                     // Cancel event if < 4h away & 100% declined 
+  const lookAheadDays = 7;                            // Look ahead for events in days 
   const chargeAttendance = "yes";                     // "yes" or "yes/maybe" - which answers to the event should count towards the drink tally
   const drinkPrices = {
   "Council Pop" : 0.0,
@@ -56,13 +55,12 @@ function updateAttendanceThreshold() {
 // MAIN SCRIPT
  
 
-  // Supported icons
+ // ICON SUPPORT
   const validIcons = ["☀️","☁️","🌧️","🌦️","⛈️","❄️","🌫️","🌁","🌤️","💨","🌪️","🌋","🌀"];
   const iconPattern = validIcons.map(i => i.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
   const titleRegexes = eventTitles.map(
     name => new RegExp(`^${name}\\s*(?:${iconPattern})?$`, "i")
   );
-
 
   const now = new Date();
   const future = new Date(now.getTime() + lookAheadDays * 24 * 60 * 60 * 1000);
@@ -70,135 +68,181 @@ function updateAttendanceThreshold() {
   const events = calendar.getEvents(now, future);
 
   events.forEach(event => {
-    const title = event.getTitle().trim();
-    if (!titleRegexes.some(r => r.test(title))) return; // match event title + icon
-
-    // Get event details from API
-    let apiEvent;
     try {
-      const eventId = event.getId().split('@')[0];
-      apiEvent = Calendar.Events.get(calendarId, eventId);
-    } catch (e) {
-      Logger.log(`Cannot fetch event "${title}": ${e}`);
-      return;
-    }
+      const title = event.getTitle().trim();
+      if (!titleRegexes.some(r => r.test(title))) return; // Skip non-matching events
 
-    if (!apiEvent.attendees) return;
+      // Get event details via Calendar API
+      let apiEvent;
+      try {
+        const eventId = event.getId().split('@')[0];
+        apiEvent = Calendar.Events.get(calendarId, eventId);
+      } catch (e) {
+        Logger.log(`Cannot fetch event "${title}": ${e}`);
+        return;
+      }
 
-    let unknownCounter = 1;
-    let yesCount = 0, noCount = 0;
-    const attending = [], declining = [], maybe = [], invited = [];
-    const guestNotes = [];
-    const drinkCount = {};
-    const drinkNoteSource = {};
+      if (!apiEvent.attendees) return;
 
-    apiEvent.attendees.forEach(att => {
-      const email = att.email.toLowerCase();
-      const status = att.responseStatus;
-      if (!["accepted","declined","tentative","needsAction"].includes(status)) return;
+      let unknownCounter = 1;
+      let yesCount = 0, noCount = 0;
+      const attending = [], declining = [], maybe = [], invited = [];
+      const guestNotes = [];
+      const drinkCount = {};
+      const drinkNoteSource = {};
 
-      const predefined = guestInfo[email];
-      let displayName, icon, favouriteDrink;
+      apiEvent.attendees.forEach(att => {
+        const email = att.email.toLowerCase();
+        const status = att.responseStatus;
+        if (!["accepted","declined","tentative","needsAction"].includes(status)) return;
 
-      if (predefined) {
-        displayName = predefined.name;
-        icon = predefined.icon || "👤";
-        favouriteDrink = predefined.drink || null;
+        const predefined = guestInfo[email];
+        let displayName, icon, favouriteDrink;
+
+        if (predefined) {
+          displayName = predefined.name;
+          icon = predefined.icon || "👤";
+          favouriteDrink = predefined.drink || null;
+        } else {
+          displayName = `Guest unknown #${unknownCounter}`;
+          icon = "👤";
+          favouriteDrink = null;
+          unknownCounter++;
+        }
+
+        const comment = att.comment ? att.comment.trim() : "";
+        const countedDrinks = [];
+        const unmatched = [];
+
+        if ((status === "accepted" || status === "tentative") && comment) {
+          const items = comment.split(',').map(i => i.trim()).filter(i => i);
+          items.forEach(item => {
+            const match = Object.keys(drinkPrices).find(d => d.toLowerCase() === item.toLowerCase());
+            if (match) countedDrinks.push(match);
+            else unmatched.push(item);
+          });
+        }
+
+        const includeInTotal =
+          (chargeAttendance === "yes" && status === "accepted") ||
+          (chargeAttendance === "yes/maybe" && (status === "accepted" || status === "tentative"));
+
+        if (includeInTotal && countedDrinks.length === 0 && favouriteDrink) {
+          countedDrinks.push(favouriteDrink);
+        }
+
+        if (includeInTotal) {
+          countedDrinks.forEach(drink => {
+            drinkCount[drink] = (drinkCount[drink] || 0) + 1;
+            if (comment) drinkNoteSource[drink] = true;
+          });
+        }
+
+        let guestLine = `${icon} ${displayName}`;
+        if (comment) guestLine += ` 📝 ${comment}`;
+        else if (favouriteDrink && includeInTotal) guestLine += ` 🥤 Favourite drink: ${favouriteDrink}`;
+
+        switch (status) {
+          case "accepted": attending.push(guestLine); yesCount++; break;
+          case "tentative": maybe.push(guestLine); break;
+          case "declined": declining.push(guestLine); noCount++; break;
+          case "needsAction": invited.push(guestLine); break;
+        }
+
+        if (unmatched.length > 0) guestNotes.push(`${displayName}: ${unmatched.join(', ')}`);
+      });
+
+      const totalInvited = apiEvent.attendees.length;
+      const threshold = totalInvited ? Math.round((yesCount / totalInvited) * 100) : 0;
+
+      // If everyone declined, delete the event
+      if (yesCount === 0 && noCount === totalInvited) {
+        Logger.log(`Deleting event "${title}" — everyone declined.`);
+        event.deleteEvent();
+        return;
+      }
+
+      // Build drinks section
+      const drinksSection = [];
+      let totalCost = 0;
+      Object.entries(drinkCount).forEach(([drink, count]) => {
+        const price = drinkPrices[drink] || 0;
+        const subtotal = count * price;
+        totalCost += subtotal;
+        const noteMarker = drinkNoteSource[drink] ? "*" : "";
+        drinksSection.push(`${drink}${noteMarker}: ${count} × £${price.toFixed(2)} = £${subtotal.toFixed(2)}`);
+      });
+      if (drinksSection.length > 0) {
+        drinksSection.push("");
+        drinksSection.push(`**💰 Total: £${totalCost.toFixed(2)}**`);
+        drinksSection.push("");
+      }
+
+      // Build description block
+      const attendanceBlock = [
+        "***",
+        `Attendance threshold: ${threshold}%`,
+        ...(attending.length ? attending : ["No attendees"]),
+        ...declining,
+        ...maybe,
+        ...invited,
+        ...(drinksSection.length ? ["", "Drink Orders:", ...drinksSection] : []),
+        ...(guestNotes.length ? ["", "Guest Notes:", ...guestNotes] : []),
+        "***"
+      ].join("\n");
+
+      let desc = event.getDescription() || "";
+      const regex = /\*\*\*[\s\S]*?\*\*\*/m;
+      if (regex.test(desc)) {
+        desc = desc.replace(regex, attendanceBlock);
       } else {
-        displayName = `Guest unknown #${unknownCounter}`;
-        icon = "👤";
-        favouriteDrink = null;
-        unknownCounter++;
+        desc = attendanceBlock + (desc ? `\n---\n${desc}` : "");
       }
 
-      const comment = att.comment ? att.comment.trim() : "";
-      const countedDrinks = [];
-      const unmatched = [];
+      // --- SILENT UPDATE USING CALENDAR API (NO EMAILS TO GUESTS) ---
+      try {
+        let iCalId;
 
-      if ((status === "accepted" || status === "tentative") && comment) {
-        const items = comment.split(',').map(i => i.trim()).filter(i => i);
-        items.forEach(item => {
-          const match = Object.keys(drinkPrices).find(d => d.toLowerCase() === item.toLowerCase());
-          if (match) countedDrinks.push(match);
-          else unmatched.push(item);
+        if (typeof event.getICalUID === "function") {
+          iCalId = event.getICalUID();
+        } else {
+          const startTimeISO = event.getStartTime().toISOString();
+          const endTimeISO = new Date(event.getEndTime().getTime() + 1).toISOString();
+          const apiEventList = Calendar.Events.list(calendarId, {
+            timeMin: startTimeISO,
+            timeMax: endTimeISO,
+            q: title,
+            maxResults: 3
+          });
+          if (!apiEventList.items || apiEventList.items.length === 0) {
+            throw new Error("Event not found via fallback search");
+          }
+          iCalId = apiEventList.items[0].iCalUID;
+        }
+
+        const apiEventList = Calendar.Events.list(calendarId, {
+          iCalUID: iCalId,
+          maxResults: 1
         });
+        if (!apiEventList.items || apiEventList.items.length === 0) {
+          throw new Error("Event not found in Calendar API");
+        }
+
+        const apiEvent = apiEventList.items[0];
+        const eventId = apiEvent.id;
+
+        const patch = { description: desc };
+        Calendar.Events.patch(patch, calendarId, eventId, { sendUpdates: "none" });
+
+        Logger.log(`✅ Silently updated "${title}" with attendance and drinks info.`);
+      } catch (apiErr) {
+        Logger.log(`⚠️ Silent update failed for "${title}": ${apiErr.message}`);
+        // fallback to normal (noisy) update if desired:
+        // event.setDescription(desc);
       }
 
-      const includeInTotal =
-        (chargeAttendance === "yes" && status === "accepted") ||
-        (chargeAttendance === "yes/maybe" && (status === "accepted" || status === "tentative"));
-
-      if (includeInTotal && countedDrinks.length === 0 && favouriteDrink) {
-        countedDrinks.push(favouriteDrink);
-      }
-
-      if (includeInTotal) {
-        countedDrinks.forEach(drink => {
-          drinkCount[drink] = (drinkCount[drink] || 0) + 1;
-          if (comment) drinkNoteSource[drink] = true;
-        });
-      }
-
-      let guestLine = `${icon} ${displayName}`;
-      if (comment) guestLine += ` 📝 ${comment}`;
-      else if (favouriteDrink && includeInTotal) guestLine += ` 🥤 Favourite drink: ${favouriteDrink}`;
-
-      switch (status) {
-        case "accepted": attending.push(guestLine); yesCount++; break;
-        case "tentative": maybe.push(guestLine); break;
-        case "declined": declining.push(guestLine); noCount++; break;
-        case "needsAction": invited.push(guestLine); break;
-      }
-
-      if (unmatched.length > 0) guestNotes.push(`${displayName}: ${unmatched.join(', ')}`);
-    });
-
-    const totalInvited = apiEvent.attendees.length;
-    const threshold = totalInvited ? Math.round((yesCount / totalInvited) * 100) : 0;
-
-    // If all declined, delete event
-    if (yesCount === 0 && noCount === totalInvited) {
-      Logger.log(`Deleting event "${title}" — everyone declined.`);
-      event.deleteEvent();
-      return;
+    } catch (err) {
+      Logger.log(`❌ Error processing event "${event.getTitle()}": ${err.message}`);
     }
-
-    const drinksSection = [];
-    let totalCost = 0;
-    Object.entries(drinkCount).forEach(([drink, count]) => {
-      const price = drinkPrices[drink] || 0;
-      const subtotal = count * price;
-      totalCost += subtotal;
-      const noteMarker = drinkNoteSource[drink] ? "*" : "";
-      drinksSection.push(`${drink}${noteMarker}: ${count} × £${price.toFixed(2)} = £${subtotal.toFixed(2)}`);
-    });
-    if (drinksSection.length > 0) {
-      drinksSection.push("");
-      drinksSection.push(`**💰 Total: £${totalCost.toFixed(2)}**`);
-      drinksSection.push("");
-    }
-
-    const attendanceBlock = [
-      "***",
-      `Attendance threshold: ${threshold}%`,
-      ...(attending.length ? attending : ["No attendees"]),
-      ...declining,
-      ...maybe,
-      ...invited,
-      ...(drinksSection.length ? ["", "Drink Orders:", ...drinksSection] : []),
-      ...(guestNotes.length ? ["", "Guest Notes:", ...guestNotes] : []),
-      "***"
-    ].join("\n");
-
-    let desc = event.getDescription() || "";
-    const regex = /\*\*\*[\s\S]*?\*\*\*/m;
-    if (regex.test(desc)) {
-      desc = desc.replace(regex, attendanceBlock);
-    } else {
-      desc = attendanceBlock + (desc ? `\n---\n${desc}` : "");
-    }
-
-    event.setDescription(desc);
-    Logger.log(`Updated "${title}" with attendance, drinks, and guest notes.`);
   });
 }
