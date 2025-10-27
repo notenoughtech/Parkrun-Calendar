@@ -1,9 +1,5 @@
 function updateAttendanceThreshold() {
 
-//this script checks the event and updates the description with attendees
-//it also makes a list of fav drinks, prices it up and creates an order tally
-//notes from the attendees can be used to order custom drinks or the ones from the list
-
 // PARAMETERS
 
   const calendarId = SECRET.calendarId;               // See Secrets.gs for details
